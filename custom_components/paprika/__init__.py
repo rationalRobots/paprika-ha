@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -224,14 +225,27 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def _get_groceries(call: ServiceCall) -> dict:
         """Grocery items with their parts kept separate.
 
-        The todo entity can only offer a single summary string, which for
-        Paprika is the raw recipe line -- "1/2 fennel bulb, trimmed and finely
-        chopped, fronds reserved for garnish". Paprika itself stores the
-        normalised ingredient and the quantity as distinct fields, and those
-        are what anything trying to match a product actually wants.
+        A todo entity can only carry one summary string, and for Paprika that
+        is the raw recipe line -- "1/2 fennel bulb, trimmed and finely
+        chopped, fronds reserved for garnish".
+
+        Paprika does store a normalised "ingredient", but it cannot be
+        trusted on its own: it truncates multi-word ingredients, giving
+        "cherry" for cherry tomatoes and "fennel" for fennel bulb, which is
+        worse than the raw line rather than better. So shopping_term is built
+        by cleaning the name instead -- dropping the recipe's parenthetical
+        notes and everything after the first comma, which is preparation
+        rather than product -- and only falls back to the ingredient when
+        there is no name at all.
         """
         coordinator = _coordinator_for(hass, call.data.get("config_entry_id"))
         include_purchased = bool(call.data.get("include_purchased"))
+
+        def clean(name: str) -> str:
+            text = re.sub(r"\([^)]*\)", " ", name)
+            text = text.split(",")[0]
+            return re.sub(r"\s+", " ", text).strip(" -–—.")
+
         items = []
         for g in coordinator.data.groceries:
             if g.get("purchased") and not include_purchased:
@@ -239,23 +253,20 @@ def _async_register_services(hass: HomeAssistant) -> None:
             ingredient = (g.get("ingredient") or "").strip()
             quantity = (g.get("quantity") or "").strip()
             name = (g.get("name") or "").strip()
+            term = clean(name) or f"{quantity} {ingredient}".strip() or name
             items.append(
                 {
                     "uid": g.get("uid"),
                     "name": name,
-                    "ingredient": ingredient or name,
+                    "ingredient": ingredient,
                     "quantity": quantity,
-                    # What belongs on a shopping list: the quantity if there
-                    # is one, then the ingredient -- never the prep steps.
-                    "shopping_term": (
-                        f"{quantity} {ingredient}".strip() if ingredient else name
-                    ),
+                    "shopping_term": term,
                     "aisle": g.get("aisle") or "",
                     "recipe": g.get("recipe") or "",
                     "purchased": bool(g.get("purchased")),
                 }
             )
-        items.sort(key=lambda i: (i["aisle"].lower(), i["ingredient"].lower()))
+        items.sort(key=lambda i: (i["aisle"].lower(), i["shopping_term"].lower()))
         return {"count": len(items), "items": items}
 
     hass.services.async_register(
