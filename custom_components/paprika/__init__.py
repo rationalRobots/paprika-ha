@@ -18,6 +18,7 @@ from .const import (
     CARDS_URL,
     CARDS_VERSION,
     DOMAIN,
+    SERVICE_GET_GROCERIES,
     SERVICE_GET_MEALS,
     SERVICE_GET_RECIPE,
     SERVICE_GET_RECIPES,
@@ -220,6 +221,55 @@ def _async_register_services(hass: HomeAssistant) -> None:
         out.sort(key=lambda m: (m["date"], m["slot_order"], m["order_flag"]))
         return {"count": len(out), "start": start.isoformat(), "days": days, "meals": out}
 
+    async def _get_groceries(call: ServiceCall) -> dict:
+        """Grocery items with their parts kept separate.
+
+        The todo entity can only offer a single summary string, which for
+        Paprika is the raw recipe line -- "1/2 fennel bulb, trimmed and finely
+        chopped, fronds reserved for garnish". Paprika itself stores the
+        normalised ingredient and the quantity as distinct fields, and those
+        are what anything trying to match a product actually wants.
+        """
+        coordinator = _coordinator_for(hass, call.data.get("config_entry_id"))
+        include_purchased = bool(call.data.get("include_purchased"))
+        items = []
+        for g in coordinator.data.groceries:
+            if g.get("purchased") and not include_purchased:
+                continue
+            ingredient = (g.get("ingredient") or "").strip()
+            quantity = (g.get("quantity") or "").strip()
+            name = (g.get("name") or "").strip()
+            items.append(
+                {
+                    "uid": g.get("uid"),
+                    "name": name,
+                    "ingredient": ingredient or name,
+                    "quantity": quantity,
+                    # What belongs on a shopping list: the quantity if there
+                    # is one, then the ingredient -- never the prep steps.
+                    "shopping_term": (
+                        f"{quantity} {ingredient}".strip() if ingredient else name
+                    ),
+                    "aisle": g.get("aisle") or "",
+                    "recipe": g.get("recipe") or "",
+                    "purchased": bool(g.get("purchased")),
+                }
+            )
+        items.sort(key=lambda i: (i["aisle"].lower(), i["ingredient"].lower()))
+        return {"count": len(items), "items": items}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_GROCERIES,
+        _get_groceries,
+        schema=vol.Schema(
+            {
+                vol.Optional("config_entry_id"): str,
+                vol.Optional("include_purchased"): bool,
+            }
+        ),
+        supports_response=SupportsResponse.ONLY,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_GET_MEALS,

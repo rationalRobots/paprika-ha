@@ -14,6 +14,7 @@ RECIPE_CACHE_VERSION = 1
 SERVICE_GET_RECIPES = "get_recipes"
 SERVICE_GET_RECIPE = "get_recipe"
 SERVICE_GET_MEALS = "get_meals"
+SERVICE_GET_GROCERIES = "get_groceries"
 
 # Bumped when the card JS changes, so browsers do not serve a stale bundle
 # from the Lovelace resource cache.

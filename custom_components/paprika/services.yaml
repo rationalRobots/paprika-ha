@@ -64,3 +64,16 @@ get_meals:
       selector:
         config_entry:
           integration: paprika
+
+get_groceries:
+  fields:
+    include_purchased:
+      required: false
+      default: false
+      selector:
+        boolean:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: paprika
