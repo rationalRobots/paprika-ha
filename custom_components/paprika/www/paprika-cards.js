@@ -58,6 +58,8 @@ const CARD_CSS = `
   table.week th { text-align: left; font-weight: 600; white-space: nowrap; }
   table.week td.today { background: rgba(3,169,244,.1); }
   .slot { color: var(--secondary-text-color, #9aa0a6); white-space: nowrap; }
+  .meal { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+  .meal:hover, .meal:focus-visible { color: var(--primary-color, #03a9f4); outline: none; }
 `;
 
 const esc = (s) =>
@@ -65,6 +67,52 @@ const esc = (s) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const stars = (n) => "★".repeat(Math.max(0, Math.min(5, n | 0)));
+
+async function fetchRecipe(hass, uid) {
+  try {
+    const res = await hass.callService(
+      "paprika", "get_recipe", { uid }, undefined, false, true);
+    return (res && res.response) || null;
+  } catch (err) {
+    return { name: "Could not load recipe", directions: [String(err)] };
+  }
+}
+
+/* One detail sheet shared by both cards: opening a recipe from the week grid
+   should look identical to opening it from the browser. */
+function detailHtml(d) {
+  if (!d) return "";
+  return `
+    <div class="detail">
+      <div class="sheet">
+        <button class="close" title="Close">×</button>
+        <h2>${esc(d.name)}</h2>
+        <div class="muted">
+          ${esc((d.categories || []).join(" · "))}
+          ${d.rating ? " · " + stars(d.rating) : ""}
+          ${d.total_time ? " · " + esc(d.total_time) : ""}
+          ${d.servings ? " · " + esc(d.servings) : ""}
+        </div>
+        ${d.photo_url ? `<img src="${esc(d.photo_url)}" alt="">` : ""}
+        ${d.description ? `<p>${esc(d.description)}</p>` : ""}
+        ${(d.ingredients || []).length
+          ? `<h3>Ingredients</h3><ul>${d.ingredients.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
+        ${(d.directions || []).length
+          ? `<h3>Method</h3><ol>${d.directions.map((i) => `<li>${esc(i)}</li>`).join("")}</ol>` : ""}
+        ${d.notes ? `<h3>Notes</h3><p>${esc(d.notes)}</p>` : ""}
+        ${d.source_url ? `<p><a href="${esc(d.source_url)}" target="_blank" rel="noopener">Source</a></p>` : ""}
+      </div>
+    </div>`;
+}
+
+function wireDetail(root, close) {
+  const btn = root.querySelector(".close");
+  if (!btn) return;
+  btn.addEventListener("click", close);
+  root.querySelector(".detail").addEventListener("click", (e) => {
+    if (e.target.classList.contains("detail")) close();
+  });
+}
 
 class PaprikaRecipeBrowser extends HTMLElement {
   static getStubConfig() {
@@ -131,13 +179,7 @@ class PaprikaRecipeBrowser extends HTMLElement {
   }
 
   async _openRecipe(uid) {
-    try {
-      const res = await this._hass.callService(
-        "paprika", "get_recipe", { uid }, undefined, false, true);
-      this._open = (res && res.response) || null;
-    } catch (err) {
-      this._open = { name: "Could not load recipe", directions: [String(err)] };
-    }
+    this._open = await fetchRecipe(this._hass, uid);
     this._render();
   }
 
@@ -159,28 +201,7 @@ class PaprikaRecipeBrowser extends HTMLElement {
         </div>
       </div>`).join("");
 
-    const d = this._open;
-    const detail = d ? `
-      <div class="detail">
-        <div class="sheet">
-          <button class="close" title="Close">×</button>
-          <h2>${esc(d.name)}</h2>
-          <div class="muted">
-            ${esc((d.categories || []).join(" · "))}
-            ${d.rating ? " · " + stars(d.rating) : ""}
-            ${d.total_time ? " · " + esc(d.total_time) : ""}
-            ${d.servings ? " · " + esc(d.servings) : ""}
-          </div>
-          ${d.photo_url ? `<img src="${esc(d.photo_url)}" alt="">` : ""}
-          ${d.description ? `<p>${esc(d.description)}</p>` : ""}
-          ${(d.ingredients || []).length
-            ? `<h3>Ingredients</h3><ul>${d.ingredients.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
-          ${(d.directions || []).length
-            ? `<h3>Method</h3><ol>${d.directions.map((i) => `<li>${esc(i)}</li>`).join("")}</ol>` : ""}
-          ${d.notes ? `<h3>Notes</h3><p>${esc(d.notes)}</p>` : ""}
-          ${d.source_url ? `<p><a href="${esc(d.source_url)}" target="_blank" rel="noopener">Source</a></p>` : ""}
-        </div>
-      </div>` : "";
+    const detail = detailHtml(this._open);
 
     r.innerHTML = `
       <style>${CARD_CSS}</style>
@@ -227,13 +248,7 @@ class PaprikaRecipeBrowser extends HTMLElement {
       el.addEventListener("click", go);
       el.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
     });
-    const close = r.querySelector(".close");
-    if (close) {
-      close.addEventListener("click", () => { this._open = null; this._render(); });
-      r.querySelector(".detail").addEventListener("click", (e) => {
-        if (e.target.classList.contains("detail")) { this._open = null; this._render(); }
-      });
-    }
+    wireDetail(r, () => { this._open = null; this._render(); });
   }
 }
 
@@ -245,8 +260,9 @@ class PaprikaMealPlan extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._events = [];
+    this._meals = [];
     this._loaded = false;
+    this._open = null;
   }
 
   setConfig(config) {
@@ -266,30 +282,15 @@ class PaprikaMealPlan extends HTMLElement {
     }
   }
 
-  _calendars() {
-    if (this._config.entities) return this._config.entities;
-    // Every Paprika meal-type calendar except the roll-up, which would
-    // duplicate every entry.
-    return Object.keys(this._hass.states).filter(
-      (e) => e.startsWith("calendar.paprika_") && e !== "calendar.paprika_all_meals");
-  }
-
   async _fetch() {
     if (!this._hass) return;
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
     try {
+      // paprika.get_meals rather than calendar.get_events: a CalendarEvent
+      // has nowhere to carry the recipe it came from, so the calendar route
+      // can show what is planned but cannot link through to the recipe.
       const res = await this._hass.callService(
-        "calendar", "get_events",
-        { start_date_time: this._local(start), duration: { days: this._config.days } },
-        { entity_id: this._calendars() }, false, true);
-      const resp = (res && res.response) || {};
-      this._events = [];
-      for (const [entity, payload] of Object.entries(resp)) {
-        const slot = (this._hass.states[entity]?.attributes.friendly_name || entity)
-          .replace(/^Paprika\s*/i, "");
-        for (const ev of payload.events || []) this._events.push({ slot, ...ev });
-      }
+        "paprika", "get_meals", { days: this._config.days }, undefined, false, true);
+      this._meals = ((res && res.response) || {}).meals || [];
       this._error = null;
     } catch (err) {
       this._error = err && err.message ? err.message : String(err);
@@ -297,38 +298,50 @@ class PaprikaMealPlan extends HTMLElement {
     this._render();
   }
 
-  _local(d) {
-    // calendar.get_events wants a naive local datetime string; toISOString
-    // would silently shift it to UTC and skew the first/last day.
-    const p = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
-           `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  async _openRecipe(uid) {
+    this._open = await fetchRecipe(this._hass, uid);
+    this._render();
   }
 
   _render() {
-    const days = [];
     const base = new Date(); base.setHours(0, 0, 0, 0);
+    const days = [];
     for (let i = 0; i < this._config.days; i++) {
       const d = new Date(base); d.setDate(base.getDate() + i);
       days.push(d);
     }
-    const slots = [...new Set(this._events.map((e) => e.slot))].sort();
-    const key = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-    const byDaySlot = {};
-    for (const ev of this._events) {
-      const when = new Date((ev.start || "").length <= 10 ? `${ev.start}T00:00:00` : ev.start);
-      const k = `${key(when)}|${ev.slot}`;
-      (byDaySlot[k] = byDaySlot[k] || []).push(ev.summary);
+    const iso = (d) => {
+      const p = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    };
+
+    const slots = [...new Set(this._meals.map((m) => m.slot).filter(Boolean))];
+    const order = {};
+    for (const m of this._meals) order[m.slot] = m.slot_order;
+    slots.sort((a, b) => (order[a] || 0) - (order[b] || 0));
+
+    const cell = {};
+    for (const m of this._meals) {
+      const k = `${m.date}|${m.slot}`;
+      (cell[k] = cell[k] || []).push(m);
     }
 
     const rows = days.map((d) => {
-      const isToday = key(d) === key(base);
-      const cells = slots.map((s) =>
-        `<td class="${isToday ? "today" : ""}">${(byDaySlot[`${key(d)}|${s}`] || [])
-          .map((x) => esc(x)).join("<br>") || "<span class=muted>—</span>"}</td>`).join("");
-      return `<tr><th class="${isToday ? "today" : ""}">${
+      const today = iso(d) === iso(base);
+      const tds = slots.map((slot) => {
+        const items = cell[`${iso(d)}|${slot}`] || [];
+        const inner = items.map((m) =>
+          m.recipe_loaded
+            ? `<span class="meal" tabindex="0" data-uid="${esc(m.recipe_uid)}">${esc(m.name)}</span>`
+            // Free-text meals, and recipes whose body has not synced yet,
+            // are shown but not offered as links that would do nothing.
+            : `<span title="${m.recipe_uid ? "Still syncing from Paprika" : "No recipe attached"}">${esc(m.name)}</span>`
+        ).join("<br>");
+        return `<td class="${today ? "today" : ""}">${inner || '<span class="muted">—</span>'}</td>`;
+      }).join("");
+      return `<tr><th class="${today ? "today" : ""}">${
         d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })
-      }</th>${cells}</tr>`;
+      }</th>${tds}</tr>`;
     }).join("");
 
     this.shadowRoot.innerHTML = `
@@ -338,11 +351,21 @@ class PaprikaMealPlan extends HTMLElement {
           ${this._error ? `<div class="muted">Could not load meals: ${esc(this._error)}</div>` : ""}
           ${slots.length ? `
           <table class="week">
-            <tr><th></th>${slots.map((s) => `<th class="slot">${esc(s)}</th>`).join("")}</tr>
+            <tr><th></th>${slots.map((x) => `<th class="slot">${esc(x)}</th>`).join("")}</tr>
             ${rows}
-          </table>` : `<div class="muted">No meals planned in the next ${this._config.days} days.</div>`}
+          </table>
+          <div class="muted" style="margin-top:8px;">Tap a meal to see the recipe.</div>`
+          : `<div class="muted">No meals planned in the next ${this._config.days} days.</div>`}
         </div>
-      </ha-card>`;
+      </ha-card>
+      ${detailHtml(this._open)}`;
+
+    this.shadowRoot.querySelectorAll(".meal").forEach((el) => {
+      const go = () => this._openRecipe(el.dataset.uid);
+      el.addEventListener("click", go);
+      el.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    });
+    wireDetail(this.shadowRoot, () => { this._open = null; this._render(); });
   }
 }
 

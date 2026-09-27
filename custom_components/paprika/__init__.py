@@ -11,12 +11,14 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ServiceValidationError
+from homeassistant.util import dt as dt_util
 
 from .api import PaprikaApi
 from .const import (
     CARDS_URL,
     CARDS_VERSION,
     DOMAIN,
+    SERVICE_GET_MEALS,
     SERVICE_GET_RECIPE,
     SERVICE_GET_RECIPES,
 )
@@ -175,6 +177,58 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 vol.Optional("category"): str,
                 vol.Optional("min_rating"): vol.All(vol.Coerce(int), vol.Range(0, 5)),
                 vol.Optional("limit"): vol.All(vol.Coerce(int), vol.Range(1, 500)),
+            }
+        ),
+        supports_response=SupportsResponse.ONLY,
+    )
+    async def _get_meals(call: ServiceCall) -> dict:
+        """Planned meals in a date window, each carrying its recipe uid.
+
+        The calendar entities cannot answer this: a CalendarEvent has nowhere
+        to put the recipe it came from, so a dashboard built on them can show
+        what is planned but cannot link through to the recipe.
+        """
+        coordinator = _coordinator_for(hass, call.data.get("config_entry_id"))
+        start = call.data.get("start_date") or dt_util.now().date()
+        if isinstance(start, str):
+            start = dt_util.parse_date(start) or dt_util.now().date()
+        days = int(call.data.get("days") or 7)
+        end = start + timedelta(days=days)
+
+        recipes = coordinator.data.recipes
+        out = []
+        for meal in coordinator.data.meals:
+            when = meal["date"]
+            if not (start <= when < end):
+                continue
+            recipe_uid = meal.get("recipe_uid")
+            # A meal can be free text with no recipe behind it; say so rather
+            # than handing back a uid that resolves to nothing.
+            loaded = recipe_uid in recipes if recipe_uid else False
+            out.append(
+                {
+                    "date": when.isoformat(),
+                    "slot": (meal.get("type") or {}).get("name") or "",
+                    "slot_order": (meal.get("type") or {}).get("order_flag") or 0,
+                    "name": meal.get("name") or "",
+                    "recipe_uid": recipe_uid or "",
+                    "recipe_loaded": loaded,
+                    "photo_url": recipes[recipe_uid].get("photo_url") if loaded else "",
+                    "order_flag": meal.get("order_flag") or 0,
+                }
+            )
+        out.sort(key=lambda m: (m["date"], m["slot_order"], m["order_flag"]))
+        return {"count": len(out), "start": start.isoformat(), "days": days, "meals": out}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_MEALS,
+        _get_meals,
+        schema=vol.Schema(
+            {
+                vol.Optional("config_entry_id"): str,
+                vol.Optional("start_date"): str,
+                vol.Optional("days"): vol.All(vol.Coerce(int), vol.Range(1, 31)),
             }
         ),
         supports_response=SupportsResponse.ONLY,
