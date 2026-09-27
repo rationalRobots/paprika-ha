@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from pathlib import Path
 
 import voluptuous as vol
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ServiceValidationError
 
 from .api import PaprikaApi
-from .const import DOMAIN, SERVICE_GET_RECIPE, SERVICE_GET_RECIPES
+from .const import (
+    CARDS_URL,
+    CARDS_VERSION,
+    DOMAIN,
+    SERVICE_GET_RECIPE,
+    SERVICE_GET_RECIPES,
+)
 from .coordinator import PaprikaCoordinator
 from .data import PaprikaConfigEntry, PaprikaRuntimeData
 
@@ -39,6 +47,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PaprikaConfigEntry) -> b
     await coordinator.async_config_entry_first_refresh()
 
     _async_register_services(hass)
+    await _async_register_frontend(hass)
 
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
     # entry.async_on_unload(entry.add_update_listener(async_reload_entry))
@@ -175,3 +184,59 @@ def _async_register_services(hass: HomeAssistant) -> None:
         ),
         supports_response=SupportsResponse.ONLY,
     )
+
+
+async def _async_register_frontend(hass: HomeAssistant) -> None:
+    """Serve the Lovelace cards from the integration and register them.
+
+    Shipping the cards here rather than asking for a separate HACS frontend
+    repo keeps the two halves versioned together -- the cards call this
+    integration's own actions, so a mismatch between them is the likeliest way
+    for a dashboard to break.
+    """
+    if hass.data.get(f"{DOMAIN}_frontend_registered"):
+        return
+    hass.data[f"{DOMAIN}_frontend_registered"] = True
+
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                CARDS_URL,
+                str(Path(__file__).parent / "www" / "paprika-cards.js"),
+                # The file changes with the integration, not per request; the
+                # version query string below is what busts the cache.
+                cache_headers=False,
+            )
+        ]
+    )
+
+    versioned = f"{CARDS_URL}?v={CARDS_VERSION}"
+    lovelace = hass.data.get("lovelace")
+    resources = getattr(lovelace, "resources", None)
+    if resources is None:
+        LOGGER.warning(
+            "Could not register the Paprika cards automatically. Add %s as a "
+            "Lovelace resource of type 'module' by hand.",
+            versioned,
+        )
+        return
+
+    try:
+        if hasattr(resources, "async_get_info"):
+            await resources.async_get_info()
+        existing = [item["url"] for item in resources.async_items()]
+        # Match on the path so a version bump replaces rather than duplicates.
+        stale = [u for u in existing if u.split("?")[0] == CARDS_URL and u != versioned]
+        if versioned in existing and not stale:
+            return
+        for item in list(resources.async_items()):
+            if item["url"] in stale:
+                await resources.async_delete_item(item["id"])
+        if versioned not in existing:
+            await resources.async_create_item({"res_type": "module", "url": versioned})
+            LOGGER.info("Registered Paprika Lovelace cards at %s", versioned)
+    except Exception:  # noqa: BLE001 - never block setup over a dashboard resource
+        LOGGER.exception(
+            "Failed to register the Paprika cards; add %s manually as a module resource",
+            versioned,
+        )

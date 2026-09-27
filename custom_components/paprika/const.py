@@ -10,3 +10,8 @@ RECIPE_FETCH_DELAY = 2.0
 
 SERVICE_GET_RECIPES = "get_recipes"
 SERVICE_GET_RECIPE = "get_recipe"
+
+# Bumped when the card JS changes, so browsers do not serve a stale bundle
+# from the Lovelace resource cache.
+CARDS_VERSION = "1"
+CARDS_URL = "/paprika_cards/paprika-cards.js"
