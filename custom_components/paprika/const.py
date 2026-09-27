@@ -8,6 +8,9 @@ DOMAIN = "paprika"
 RECIPE_FETCH_BATCH = 20
 RECIPE_FETCH_DELAY = 2.0
 
+# Bumped if the cached recipe shape changes, which invalidates the store.
+RECIPE_CACHE_VERSION = 1
+
 SERVICE_GET_RECIPES = "get_recipes"
 SERVICE_GET_RECIPE = "get_recipe"
 

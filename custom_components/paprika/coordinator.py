@@ -2,9 +2,15 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import RECIPE_FETCH_BATCH, RECIPE_FETCH_DELAY
+from .const import (
+    DOMAIN,
+    RECIPE_CACHE_VERSION,
+    RECIPE_FETCH_BATCH,
+    RECIPE_FETCH_DELAY,
+)
 
 if TYPE_CHECKING:
     from .api import (
@@ -45,10 +51,38 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
     # few per cycle, and a large library simply warms up over a few hours.
     _recipes: dict["RecipeID", "Recipe"]
     _hashes: dict["RecipeID", str]
+    _store: "Store | None" = None
+
+    async def async_load_cache(self) -> None:
+        """Restore cached recipe bodies from disk.
+
+        Without this the cache is memory-only, so every Home Assistant restart
+        discards the whole library and refetches it one request at a time --
+        which, at the pace the throttling demands, a library of any size never
+        finishes if restarts are at all frequent.
+        """
+        self._store = Store(
+            self.hass, RECIPE_CACHE_VERSION, f"{DOMAIN}.recipes.{self.config_entry.entry_id}"
+        )
+        cached = await self._store.async_load() or {}
+        self._recipes = cached.get("recipes", {})
+        self._hashes = cached.get("hashes", {})
+        if self._recipes:
+            self.logger.debug("Restored %s cached recipes", len(self._recipes))
+
+    def _save_cache(self) -> None:
+        if self._store is None:
+            return
+        # Delayed save: a batch writes many recipes in quick succession and
+        # there is no need to hit the disk for each one.
+        self._store.async_delay_save(
+            lambda: {"recipes": self._recipes, "hashes": self._hashes}, 30
+        )
 
     async def _async_update_data(self) -> Any:
         """Update data via library."""
         if not hasattr(self, "_recipes"):
+            # async_load_cache should have run at setup; be safe if it did not.
             self._recipes = {}
             self._hashes = {}
 
@@ -81,6 +115,7 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
             for entry in recipe_index
             if self._hashes.get(entry["uid"]) != entry["hash"]
         ]
+        fetched = 0
         for entry in stale[:RECIPE_FETCH_BATCH]:
             try:
                 recipe = await client.get_recipe(entry["uid"])
@@ -89,7 +124,11 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
                 continue
             self._recipes[entry["uid"]] = recipe
             self._hashes[entry["uid"]] = entry["hash"]
+            fetched += 1
             await asyncio.sleep(RECIPE_FETCH_DELAY)
+
+        if fetched:
+            self._save_cache()
 
         pending = max(len(stale) - RECIPE_FETCH_BATCH, 0)
         if pending:
@@ -97,9 +136,12 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
 
         # Drop bodies for recipes that have gone from the index.
         live = {entry["uid"] for entry in recipe_index}
-        for uid in [u for u in self._recipes if u not in live]:
+        removed = [u for u in self._recipes if u not in live]
+        for uid in removed:
             del self._recipes[uid]
             self._hashes.pop(uid, None)
+        if removed:
+            self._save_cache()
 
         return PaprikaData(
             status=current_status,

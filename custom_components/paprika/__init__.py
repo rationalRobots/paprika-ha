@@ -43,6 +43,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: PaprikaConfigEntry) -> b
     client = PaprikaApi(token)
     entry.runtime_data = PaprikaRuntimeData(client=client, coordinator=coordinator)
 
+    # Must happen before the first refresh, or that refresh starts from an
+    # empty cache and refetches everything.
+    await coordinator.async_load_cache()
+
     # https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-single-api-poll-for-data-for-all-entities
     await coordinator.async_config_entry_first_refresh()
 
