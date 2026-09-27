@@ -54,6 +54,44 @@ class PlannedMeal(TypedDict):
     is_ingredient: bool
 
 
+class Category(TypedDict):
+    uid: str
+    name: str
+    order_flag: int
+    parent_uid: Optional[str]
+
+
+class RecipeIndexEntry(TypedDict):
+    """What sync/recipes returns: identity and a change token, no content."""
+
+    uid: RecipeID
+    hash: str
+
+
+class Recipe(TypedDict):
+    uid: RecipeID
+    name: str
+    ingredients: str
+    directions: str
+    description: str
+    notes: str
+    nutritional_info: str
+    servings: str
+    difficulty: str
+    prep_time: str
+    cook_time: str
+    total_time: str
+    rating: int
+    categories: list[str]
+    source: str
+    source_url: str
+    photo_url: str
+    hash: str
+    created: str
+    on_favorites: bool
+    in_trash: bool
+
+
 class GroceryListItem(TypedDict):
     uid: str
     recipe_uid: RecipeID | None
@@ -134,6 +172,41 @@ class PaprikaApi:
             meals.append(cast("PlannedMeal", meal))
         _LOGGER.debug("Got %s meals from API", len(meals))
         return meals
+
+    async def get_categories(self) -> list[Category]:
+        """Category definitions.
+
+        Needed because a recipe's "categories" field holds category *uids*,
+        not names -- despite some clients documenting it as names. Without
+        this mapping every recipe's category reads as a raw GUID.
+        """
+        response = await self.session.get("sync/categories")
+        response.raise_for_status()
+        response_json = await response.json()
+        return [cast("Category", item) for item in response_json["result"]]
+
+    async def get_recipe_index(self) -> list[RecipeIndexEntry]:
+        """List every recipe as {uid, hash} -- identity only, no bodies.
+
+        The hash is a change token rather than a content hash, so it is only
+        useful for comparison: if it is unchanged, the cached body is current.
+        """
+        response = await self.session.get("sync/recipes")
+        response.raise_for_status()
+        response_json = await response.json()
+        return [cast("RecipeIndexEntry", item) for item in response_json["result"]]
+
+    async def get_recipe(self, uid: RecipeID) -> Recipe:
+        """Fetch one recipe in full.
+
+        Note the singular path: sync/recipes (plural) is the index, and there
+        is no bulk body endpoint, so a full library costs one request each.
+        See PaprikaCoordinator for why those are spread over time.
+        """
+        response = await self.session.get(f"sync/recipe/{uid}")
+        response.raise_for_status()
+        response_json = await response.json()
+        return cast("Recipe", response_json["result"])
 
     async def get_groceries(self) -> list[GroceryListItem]:
         """Get grocery list items, for all lists."""

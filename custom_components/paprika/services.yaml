@@ -1,0 +1,45 @@
+get_recipes:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: paprika
+    search:
+      required: false
+      example: curry
+      selector:
+        text:
+    category:
+      required: false
+      example: Dinner
+      selector:
+        text:
+    min_rating:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 5
+          mode: box
+    limit:
+      required: false
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 500
+          mode: box
+
+get_recipe:
+  fields:
+    uid:
+      required: true
+      example: 07975578-DE1A-42AB-B184-6E8FCB9AB753
+      selector:
+        text:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: paprika
