@@ -1,5 +1,7 @@
 import asyncio
+import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.storage import Store
@@ -7,6 +9,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     DOMAIN,
+    PHOTO_DIR,
+    PHOTO_URL_BASE,
     RECIPE_CACHE_VERSION,
     RECIPE_FETCH_BATCH,
     RECIPE_FETCH_DELAY,
@@ -52,6 +56,48 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
     _recipes: dict["RecipeID", "Recipe"]
     _hashes: dict["RecipeID", str]
     _store: "Store | None" = None
+    _photo_failed: set
+    _photo_root: "Path | None" = None
+
+    def photo_ref(self, uid: str) -> str:
+        """Local path for a downloaded photo, or "" if there is not one.
+
+        Never returns Paprika's own photo_url: it is a signed URL that expires
+        in hours, so anything holding on to it ends up rendering broken
+        images.
+        """
+        if self._photo_root and (self._photo_root / f"{uid}.jpg").exists():
+            return f"{PHOTO_URL_BASE}/{uid}.jpg"
+        return ""
+
+    def _needs_photo(self, uid: str) -> bool:
+        recipe = self._recipes.get(uid)
+        if recipe is None or uid in self._photo_failed:
+            return False
+        if not recipe.get("photo_url"):
+            return False          # genuinely has no picture; do not keep asking
+        return not (self._photo_root / f"{uid}.jpg").exists()
+
+    async def _fetch_photo(self, uid: str, recipe: dict) -> None:
+        url = recipe.get("photo_url")
+        if not url or self._photo_root is None:
+            return
+        target = self._photo_root / f"{uid}.jpg"
+
+        def _download() -> None:
+            # Photo URLs are pre-signed, so this is a plain unauthenticated
+            # GET -- and it has to happen promptly after fetching the recipe,
+            # while the signature is still valid.
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                tmp = target.with_suffix(".part")
+                tmp.write_bytes(resp.read())
+                tmp.replace(target)
+
+        try:
+            await asyncio.to_thread(_download)
+        except Exception as exc:  # noqa: BLE001
+            self._photo_failed.add(uid)
+            self.logger.debug("could not download photo for %s: %s", uid, exc)
 
     async def async_load_cache(self) -> None:
         """Restore cached recipe bodies from disk.
@@ -61,6 +107,9 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
         which, at the pace the throttling demands, a library of any size never
         finishes if restarts are at all frequent.
         """
+        self._photo_failed = set()
+        self._photo_root = Path(self.hass.config.path(PHOTO_DIR))
+        await asyncio.to_thread(self._photo_root.mkdir, 0o755, True, True)
         self._store = Store(
             self.hass, RECIPE_CACHE_VERSION, f"{DOMAIN}.recipes.{self.config_entry.entry_id}"
         )
@@ -85,6 +134,8 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
             # async_load_cache should have run at setup; be safe if it did not.
             self._recipes = {}
             self._hashes = {}
+        if not hasattr(self, "_photo_failed"):
+            self._photo_failed = set()
 
         client = self.config_entry.runtime_data.client
         current_status = await client.get_status()
@@ -110,10 +161,14 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
             recipe_index = self.data.recipe_index
             categories = self.data.categories
 
+        # A recipe is worth fetching if its body changed, or if we have the
+        # body but never managed to save its picture -- the second case needs
+        # a fresh fetch purely to mint a photo_url that has not expired.
         stale = [
             entry
             for entry in recipe_index
             if self._hashes.get(entry["uid"]) != entry["hash"]
+            or self._needs_photo(entry["uid"])
         ]
         fetched = 0
         for entry in stale[:RECIPE_FETCH_BATCH]:
@@ -124,6 +179,7 @@ class PaprikaCoordinator(DataUpdateCoordinator[PaprikaData]):
                 continue
             self._recipes[entry["uid"]] = recipe
             self._hashes[entry["uid"]] = entry["hash"]
+            await self._fetch_photo(entry["uid"], recipe)
             fetched += 1
             await asyncio.sleep(RECIPE_FETCH_DELAY)
 

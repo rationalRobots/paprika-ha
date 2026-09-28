@@ -19,6 +19,8 @@ from .const import (
     CARDS_URL,
     CARDS_VERSION,
     DOMAIN,
+    PHOTO_DIR,
+    PHOTO_URL_BASE,
     SERVICE_GET_GROCERIES,
     SERVICE_GET_MEALS,
     SERVICE_GET_RECIPE,
@@ -92,7 +94,7 @@ def _coordinator_for(hass: HomeAssistant, entry_id: str | None):
     return entries[0].runtime_data.coordinator
 
 
-def _summarise(uid, recipe, categories: dict[str, str]) -> dict:
+def _summarise(uid, recipe, categories: dict[str, str], photo: str = "") -> dict:
     """The fields a browser needs, without the body."""
     return {
         "uid": uid,
@@ -100,7 +102,8 @@ def _summarise(uid, recipe, categories: dict[str, str]) -> dict:
         # Stored as uids upstream, so map them or every card shows GUIDs.
         "categories": [categories.get(c, c) for c in (recipe.get("categories") or [])],
         "rating": recipe.get("rating") or 0,
-        "photo_url": recipe.get("photo_url") or "",
+        # The local copy: Paprika's own photo_url expires within hours.
+        "photo_url": photo,
         "total_time": recipe.get("total_time") or "",
         "servings": recipe.get("servings") or "",
         "source_url": recipe.get("source_url") or "",
@@ -130,7 +133,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 continue
             if search and search not in (recipe.get("name") or "").lower():
                 continue
-            results.append(_summarise(uid, recipe, coordinator.data.categories))
+            results.append(
+                _summarise(uid, recipe, coordinator.data.categories,
+                           coordinator.photo_ref(uid))
+            )
 
         results.sort(key=lambda r: r["name"].lower())
         return {
@@ -148,7 +154,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
         # Ingredients and directions are newline-delimited text upstream;
         # split them so cards do not each have to reimplement that.
         return {
-            **_summarise(uid, recipe, coordinator.data.categories),
+            **_summarise(uid, recipe, coordinator.data.categories,
+                         coordinator.photo_ref(uid)),
             "description": recipe.get("description") or "",
             "notes": recipe.get("notes") or "",
             "nutritional_info": recipe.get("nutritional_info") or "",
@@ -215,7 +222,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     "name": meal.get("name") or "",
                     "recipe_uid": recipe_uid or "",
                     "recipe_loaded": loaded,
-                    "photo_url": recipes[recipe_uid].get("photo_url") if loaded else "",
+                    "photo_url": coordinator.photo_ref(recipe_uid) if loaded else "",
                     "order_flag": meal.get("order_flag") or 0,
                 }
             )
@@ -317,8 +324,19 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         return
     hass.data[f"{DOMAIN}_frontend_registered"] = True
 
+    photo_dir = Path(hass.config.path(PHOTO_DIR))
+    await hass.async_add_executor_job(lambda: photo_dir.mkdir(parents=True, exist_ok=True))
+
     await hass.http.async_register_static_paths(
         [
+            StaticPathConfig(
+                # Downloaded recipe photos. Cached hard: the file for a given
+                # uid only changes when the recipe's picture does, and the
+                # card asks for it on every tile.
+                PHOTO_URL_BASE,
+                str(photo_dir),
+                cache_headers=True,
+            ),
             StaticPathConfig(
                 CARDS_URL,
                 str(Path(__file__).parent / "www" / "paprika-cards.js"),

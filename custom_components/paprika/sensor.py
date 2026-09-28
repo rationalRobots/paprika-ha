@@ -99,10 +99,9 @@ class PaprikaRecipeSensor(SensorEntity, CoordinatorEntity["PaprikaCoordinator"])
 
     @property
     def entity_picture(self) -> str | None:
-        # Paprika's photo_url is a signed URL that expires after a few hours,
-        # so it is read live from the cached body rather than stored anywhere.
-        recipe = self._recipe
-        return recipe.get("photo_url") if recipe else None
+        # The downloaded copy. Paprika's own photo_url is a signed link that
+        # expires within hours, so serving it gives broken images.
+        return self.coordinator.photo_ref(self._uid) or None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
