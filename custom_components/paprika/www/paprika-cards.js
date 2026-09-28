@@ -21,7 +21,16 @@ const CARD_CSS = `
   }
   .bar input { flex: 1 1 140px; }
   .muted { color: var(--secondary-text-color, #9aa0a6); font-size: .85em; }
-  .grid { display: grid; gap: 12px; grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr)); }
+  /* auto-fill rather than a fixed count: in a panel view the card is as wide
+     as the screen, and a hard column count either leaves gutters on a monitor
+     or squeezes unreadably on a tablet. --cols caps it so a very wide screen
+     does not end up with tiny tiles. */
+  .grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(min(210px, 100%), 1fr));
+    max-width: calc(var(--cols, 5) * 260px);
+  }
+  @media (max-width: 500px) { .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); } }
   .tile {
     cursor: pointer; border-radius: 14px; overflow: hidden;
     background: var(--ha-card-background, var(--card-background-color, #1c1e22));

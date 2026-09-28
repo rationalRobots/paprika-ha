@@ -18,5 +18,5 @@ SERVICE_GET_GROCERIES = "get_groceries"
 
 # Bumped when the card JS changes, so browsers do not serve a stale bundle
 # from the Lovelace resource cache.
-CARDS_VERSION = "3"
+CARDS_VERSION = "4"
 CARDS_URL = "/paprika_cards/paprika-cards.js"
