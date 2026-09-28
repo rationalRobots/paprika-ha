@@ -51,15 +51,26 @@ const CARD_CSS = `
   .close { float: right; cursor: pointer; border: none; background: transparent;
     color: var(--primary-text-color, #fff); font-size: 1.4em; line-height: 1; }
   table.week { width: 100%; border-collapse: collapse; }
+  table.week { table-layout: fixed; }
   table.week th, table.week td {
     border: 1px solid var(--divider-color, rgba(255,255,255,.1));
     padding: 6px 8px; vertical-align: top; font-size: .9em;
   }
+  table.week th:first-child { width: 92px; }
   table.week th { text-align: left; font-weight: 600; white-space: nowrap; }
   table.week td.today { background: rgba(3,169,244,.1); }
   .slot { color: var(--secondary-text-color, #9aa0a6); white-space: nowrap; }
-  .meal { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
-  .meal:hover, .meal:focus-visible { color: var(--primary-color, #03a9f4); outline: none; }
+  .meal { cursor: pointer; display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+  .meal:hover .mtitle, .meal:focus-visible .mtitle { color: var(--primary-color, #03a9f4); }
+  .meal:focus-visible { outline: none; }
+  .meal img, .meal .thumb {
+    width: 40px; height: 40px; flex: 0 0 40px; border-radius: 8px; object-fit: cover;
+    background: rgba(255,255,255,.06);
+  }
+  .meal .thumb { display: grid; place-items: center; font-size: 1.1em; }
+  .mtitle { min-width: 0; overflow-wrap: anywhere; }
+  .plain { display: flex; gap: 8px; align-items: center; padding: 3px 0;
+           color: var(--secondary-text-color, #9aa0a6); }
 `;
 
 const esc = (s) =>
@@ -330,13 +341,21 @@ class PaprikaMealPlan extends HTMLElement {
       const today = iso(d) === iso(base);
       const tds = slots.map((slot) => {
         const items = cell[`${iso(d)}|${slot}`] || [];
+        const thumb = (m) =>
+          m.photo_url
+            ? `<img loading="lazy" src="${esc(m.photo_url)}" alt="">`
+            : `<span class="thumb">🍽️</span>`;
         const inner = items.map((m) =>
           m.recipe_loaded
-            ? `<span class="meal" tabindex="0" data-uid="${esc(m.recipe_uid)}">${esc(m.name)}</span>`
+            ? `<div class="meal" tabindex="0" data-uid="${esc(m.recipe_uid)}">
+                 ${thumb(m)}<span class="mtitle">${esc(m.name)}</span>
+               </div>`
             // Free-text meals, and recipes whose body has not synced yet,
             // are shown but not offered as links that would do nothing.
-            : `<span title="${m.recipe_uid ? "Still syncing from Paprika" : "No recipe attached"}">${esc(m.name)}</span>`
-        ).join("<br>");
+            : `<div class="plain" title="${m.recipe_uid ? "Still syncing from Paprika" : "No recipe attached"}">
+                 ${thumb(m)}<span class="mtitle">${esc(m.name)}</span>
+               </div>`
+        ).join("");
         return `<td class="${today ? "today" : ""}">${inner || '<span class="muted">—</span>'}</td>`;
       }).join("");
       return `<tr><th class="${today ? "today" : ""}">${
