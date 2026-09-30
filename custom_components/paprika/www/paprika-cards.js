@@ -80,6 +80,28 @@ const CARD_CSS = `
   .mtitle { min-width: 0; overflow-wrap: anywhere; }
   .plain { display: flex; gap: 8px; align-items: center; padding: 3px 0;
            color: var(--secondary-text-color, #9aa0a6); }
+
+  /* A seven-column grid is unreadable on a phone held upright, so the same
+     data is also rendered as a day-by-day list and the two are swapped by
+     media query. Rendering both and hiding one avoids a resize listener and
+     survives rotation with no JavaScript at all. */
+  .daylist { display: none; }
+  .day { border-top: 1px solid var(--divider-color, rgba(255,255,255,.1)); padding: 10px 0; }
+  .day:first-child { border-top: none; }
+  .day.today .dayhead { color: var(--primary-color, #03a9f4); }
+  .dayhead { font-weight: 700; margin-bottom: 6px; }
+  .slotrow { display: grid; grid-template-columns: 84px 1fr; gap: 8px;
+             align-items: start; padding: 2px 0; }
+  .slotrow .slotname { color: var(--secondary-text-color, #9aa0a6); font-size: .85em;
+                       padding-top: 10px; }
+  .empty { color: var(--secondary-text-color, #9aa0a6); font-size: .9em; }
+  @media (max-width: 760px) {
+    table.week { display: none; }
+    .daylist { display: block; }
+    .meal img, .meal .thumb, .plain img, .plain .thumb {
+      width: 34px; height: 34px; flex-basis: 34px;
+    }
+  }
 `;
 
 const esc = (s) =>
@@ -286,12 +308,31 @@ class PaprikaMealPlan extends HTMLElement {
   }
 
   setConfig(config) {
-    this._config = { days: 7, title: "Meal plan", ...config };
+    // "week" shows the calendar week you are in (Monday to Sunday), which is
+    // how a meal plan is actually written; "rolling" shows the next N days
+    // from today.
+    this._config = { days: 7, title: "Meal plan", mode: "week", ...config };
     this._loaded = false;
   }
 
   getCardSize() {
     return 6;
+  }
+
+  _startDay() {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    if (this._config.mode === "week") {
+      // getDay() is Sunday-first; shift so Monday is 0.
+      const dow = (d.getDay() + 6) % 7;
+      d.setDate(d.getDate() - dow);
+    }
+    return d;
+  }
+
+  _iso(d) {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
   set hass(hass) {
@@ -309,7 +350,9 @@ class PaprikaMealPlan extends HTMLElement {
       // has nowhere to carry the recipe it came from, so the calendar route
       // can show what is planned but cannot link through to the recipe.
       const res = await this._hass.callService(
-        "paprika", "get_meals", { days: this._config.days }, undefined, false, true);
+        "paprika", "get_meals",
+        { days: this._config.days, start_date: this._iso(this._startDay()) },
+        undefined, false, true);
       this._meals = ((res && res.response) || {}).meals || [];
       this._error = null;
     } catch (err) {
@@ -324,16 +367,14 @@ class PaprikaMealPlan extends HTMLElement {
   }
 
   _render() {
-    const base = new Date(); base.setHours(0, 0, 0, 0);
+    const start = this._startDay();
+    const today = new Date(); today.setHours(0, 0, 0, 0);
     const days = [];
     for (let i = 0; i < this._config.days; i++) {
-      const d = new Date(base); d.setDate(base.getDate() + i);
+      const d = new Date(start); d.setDate(start.getDate() + i);
       days.push(d);
     }
-    const iso = (d) => {
-      const p = (n) => String(n).padStart(2, "0");
-      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-    };
+    const iso = (d) => this._iso(d);
 
     const slots = [...new Set(this._meals.map((m) => m.slot).filter(Boolean))];
     const order = {};
@@ -346,35 +387,57 @@ class PaprikaMealPlan extends HTMLElement {
       (cell[k] = cell[k] || []).push(m);
     }
 
+    const thumb = (m) =>
+      m.photo_url
+        ? `<img loading="lazy" src="${esc(m.photo_url)}" alt="">`
+        : `<span class="thumb">🍽️</span>`;
+    // Shared by the table and the phone list so the two cannot drift apart.
+    const mealHtml = (m) =>
+      m.recipe_loaded
+        ? `<div class="meal" tabindex="0" data-uid="${esc(m.recipe_uid)}">
+             ${thumb(m)}<span class="mtitle">${esc(m.name)}</span></div>`
+        // Free-text meals, and recipes whose body has not synced yet, are
+        // shown but not offered as links that would do nothing.
+        : `<div class="plain" title="${m.recipe_uid ? "Still syncing from Paprika" : "No recipe attached"}">
+             ${thumb(m)}<span class="mtitle">${esc(m.name)}</span></div>`;
+
     const rows = days.map((d) => {
-      const today = iso(d) === iso(base);
+      const isToday = iso(d) === iso(today);
       const tds = slots.map((slot) => {
         const items = cell[`${iso(d)}|${slot}`] || [];
-        const thumb = (m) =>
-          m.photo_url
-            ? `<img loading="lazy" src="${esc(m.photo_url)}" alt="">`
-            : `<span class="thumb">🍽️</span>`;
-        const inner = items.map((m) =>
-          m.recipe_loaded
-            ? `<div class="meal" tabindex="0" data-uid="${esc(m.recipe_uid)}">
-                 ${thumb(m)}<span class="mtitle">${esc(m.name)}</span>
-               </div>`
-            // Free-text meals, and recipes whose body has not synced yet,
-            // are shown but not offered as links that would do nothing.
-            : `<div class="plain" title="${m.recipe_uid ? "Still syncing from Paprika" : "No recipe attached"}">
-                 ${thumb(m)}<span class="mtitle">${esc(m.name)}</span>
-               </div>`
-        ).join("");
-        return `<td class="${today ? "today" : ""}">${inner || '<span class="muted">—</span>'}</td>`;
+        const inner = items.map((m) => mealHtml(m)).join("");
+        return `<td class="${isToday ? "today" : ""}">${inner || '<span class="muted">—</span>'}</td>`;
       }).join("");
-      return `<tr><th class="${today ? "today" : ""}">${
+      return `<tr><th class="${isToday ? "today" : ""}">${
         d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })
       }</th>${tds}</tr>`;
     }).join("");
 
+    // The same data as a day-by-day list, shown instead of the table on a
+    // narrow screen. Built here rather than in the template so a missing
+    // definition is a syntax error, not a silent ReferenceError at runtime.
+    const dayList = days.map((d) => {
+      const isToday = iso(d) === iso(today);
+      const inner = slots.map((slot) => {
+        const items = cell[`${iso(d)}|${slot}`] || [];
+        if (!items.length) return "";
+        return `<div class="slotrow"><span class="slotname">${esc(slot)}</span>
+                  <div>${items.map((m) => mealHtml(m)).join("")}</div></div>`;
+      }).filter(Boolean).join("");
+      return `<div class="day ${isToday ? "today" : ""}">
+                <div class="dayhead">${esc(d.toLocaleDateString(undefined,
+                  { weekday: "long", day: "numeric", month: "short" }))}</div>
+                ${inner || '<div class="empty">Nothing planned</div>'}
+              </div>`;
+    }).join("");
+
     this.shadowRoot.innerHTML = `
       <style>${CARD_CSS}</style>
-      <ha-card header="${esc(this._config.title)}">
+      <ha-card header="${esc(this._config.title)} · ${esc(
+        start.toLocaleDateString(undefined, { day: "numeric", month: "short" })
+      )} – ${esc(
+        days[days.length - 1].toLocaleDateString(undefined, { day: "numeric", month: "short" })
+      )}">
         <div style="padding: 0 16px 16px;">
           ${this._error ? `<div class="muted">Could not load meals: ${esc(this._error)}</div>` : ""}
           ${slots.length ? `
@@ -382,6 +445,7 @@ class PaprikaMealPlan extends HTMLElement {
             <tr><th></th>${slots.map((x) => `<th class="slot">${esc(x)}</th>`).join("")}</tr>
             ${rows}
           </table>
+          <div class="daylist">${dayList}</div>
           <div class="muted" style="margin-top:8px;">Tap a meal to see the recipe.</div>`
           : `<div class="muted">No meals planned in the next ${this._config.days} days.</div>`}
         </div>
